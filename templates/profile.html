@@ -1,0 +1,13 @@
+<h2>Profile</h2>
+{% if user.is_2fa_enabled %}
+<p>2FA is currently enabled.</p>
+<a href="/qrcode">View QR Code</a>
+<form action="/profile" method="POST">
+    <button type="submit" name="disable_2fa">Disable 2FA</button>
+</form>
+{% else %}
+<p>2FA is currently disabled.</p>
+<form action="/profile" method="POST">
+    <button type="submit" name="enable_2fa">Enable 2FA</button>
+</form>
+{% endif %}

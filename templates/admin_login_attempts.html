@@ -5,6 +5,7 @@
     <thead>
         <tr>
             <th>Username</th>
+            <th>IP Address</th>
             <th>Timestamp</th>
             <th>Success</th>
         </tr>
@@ -13,6 +14,7 @@
         {% for attempt in login_attempts %}
         <tr>
             <td>{{ attempt.username }}</td>
+            <td>{{ attempt.ip_address }}</td>
             <td>{{ attempt.timestamp }}</td>
             <td>{{ "Yes" if attempt.success else "No" }}</td>
         </tr>

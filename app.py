@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, flash
+from flask import Flask, render_template, request, redirect, url_for, flash, session
 from flask_bcrypt import Bcrypt
 from flask_sqlalchemy import SQLAlchemy
 from flask_wtf import FlaskForm
@@ -9,6 +9,10 @@ import requests
 from flask_mail import Mail, Message
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired
 from datetime import datetime
+import pyotp
+import qrcode
+from io import BytesIO
+from base64 import b64encode
 
 # Configuration
 app = Flask(__name__)
@@ -39,13 +43,23 @@ class User(db.Model):
     username = db.Column(db.String(80), unique=True, nullable=False)
     password_hash = db.Column(db.String(120), nullable=False)
     is_active = db.Column(db.Boolean, default=False)
-    failed_attempts = db.Column(db.Integer, default=0)  # Failed login attempts
+    failed_attempts = db.Column(db.Integer, default=0)
+    is_2fa_enabled = db.Column(db.Boolean, default=False)  # 2FA enabled/disabled
+    totp_secret = db.Column(db.String(16), nullable=True)  # TOTP secret
 
 class LoginAttempt(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), nullable=False)
     timestamp = db.Column(db.DateTime, nullable=False)
     success = db.Column(db.Boolean, nullable=False)
+    ip_address = db.Column(db.String(45), nullable=True)  # Store the IP address of the user
+
+def generate_totp_secret():
+    return pyotp.random_base32()
+
+def verify_totp(secret, code):
+    totp = pyotp.TOTP(secret)
+    return totp.verify(code)
 
 # Create database
 with app.app_context():
@@ -155,14 +169,14 @@ MAX_FAILED_ATTEMPTS = 5
 def login():
     username = request.form["username"]
     password = request.form["password"]
-
     user = User.query.filter_by(username=username).first()
 
-    # Log the login attempt
+    # Prepare to log the attempt
     login_attempt = LoginAttempt(
         username=username,
         timestamp=datetime.utcnow(),
-        success=False,
+        success=False,  # Default to failed attempt
+        ip_address=request.remote_addr,
     )
 
     if not user:
@@ -184,28 +198,84 @@ def login():
         return redirect(url_for("index"))
 
     if bcrypt.check_password_hash(user.password_hash, password):
-        # Reset failed attempts on successful login
+        if user.is_2fa_enabled:
+            session["username"] = username
+            flash("Enter the 2FA code to complete login.", "info")
+            login_attempt.success = True  # Password is correct
+            db.session.add(login_attempt)
+            db.session.commit()
+            return redirect(url_for("verify_2fa"))
+
+        # Successful login without 2FA
+        session["username"] = username
         user.failed_attempts = 0
-        login_attempt.success = True
         flash("Login successful!", "success")
+        login_attempt.success = True
         db.session.add(login_attempt)
         db.session.commit()
-        return redirect(url_for("dashboard"))
+        return redirect(url_for("profile"))
+
+    # Failed login: Increment failed attempts
+    user.failed_attempts += 1
+    db.session.add(login_attempt)
+    db.session.commit()
+    if user.failed_attempts >= MAX_FAILED_ATTEMPTS:
+        flash("Account locked due to too many failed login attempts.", "error")
     else:
-        # Increment failed attempts on incorrect login
-        user.failed_attempts += 1
-        if user.failed_attempts >= MAX_FAILED_ATTEMPTS:
-            flash("Account locked due to too many failed login attempts.", "error")
-        else:
-            flash("Invalid password. Please try again.", "error")
-        db.session.add(login_attempt)
-        db.session.commit()
+        flash("Invalid password. Please try again.", "error")
+    return redirect(url_for("index"))
+
+@app.route("/verify-2fa", methods=["GET", "POST"])
+def verify_2fa():
+    user = User.query.filter_by(username=session.get("username")).first()
+    if not user or not user.is_2fa_enabled:
+        flash("2FA is not enabled for your account.", "error")
         return redirect(url_for("index"))
 
+    if request.method == "POST":
+        code = request.form["code"]
+        if verify_totp(user.totp_secret, code):
+            flash("2FA verified successfully!", "success")
+            return redirect(url_for("profile"))
+        else:
+            flash("Invalid 2FA code. Please try again.", "error")
+            return redirect(url_for("verify_2fa"))
 
-@app.route("/dashboard")
-def dashboard():
-    return "Welcome to your dashboard!"
+    return render_template("verify_2fa.html")
+
+@app.route("/profile", methods=["GET", "POST"])
+def profile():
+    user = User.query.filter_by(username=session.get("username")).first()
+    if request.method == "POST":
+        if "enable_2fa" in request.form:
+            user.totp_secret = generate_totp_secret()
+            user.is_2fa_enabled = True
+            db.session.commit()
+            flash("2FA enabled. Use the displayed QR code to configure your authenticator app.", "success")
+        elif "disable_2fa" in request.form:
+            user.is_2fa_enabled = False
+            user.totp_secret = None
+            db.session.commit()
+            flash("2FA disabled.", "success")
+    return render_template("profile.html", user=user)
+
+@app.route("/qrcode")
+def qrcode_page():
+    user = User.query.filter_by(username=session.get("username")).first()
+    if not user or not user.totp_secret:
+        flash("2FA is not enabled for your account.", "error")
+        return redirect(url_for("profile"))
+
+    totp = pyotp.TOTP(user.totp_secret)
+    uri = totp.provisioning_uri(
+        name=user.username, issuer_name="YourAppName"
+    )
+    qr = qrcode.make(uri)
+    buffer = BytesIO()
+    qr.save(buffer)
+    buffer.seek(0)
+    img_str = b64encode(buffer.getvalue()).decode("utf-8")
+    return render_template("qrcode.html", img_data=img_str)
 
 @app.route("/admin/login_attempts")
 def view_login_attempts():
