@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Register</h2>
+<form action="/register" method="POST">
+    {{ form.hidden_tag() }}
+    <label for="username">Username:</label>
+    {{ form.username }}
+    <label for="password">Password:</label>
+    {{ form.password }}
+    <div class="g-recaptcha" data-sitekey="{{ config['RECAPTCHA_SITE_KEY'] }}"></div>
+    {{ form.submit }}
+</form>
+<a href="{{ url_for('index') }}">Back to Login</a>
+<script src="https://www.google.com/recaptcha/api.js" async defer></script>
+{% endblock %}
