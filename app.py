@@ -8,13 +8,14 @@ import re
 import requests
 from flask_mail import Mail, Message
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired
-from datetime import datetime
+from datetime import datetime, timedelta
 import pyotp
 import qrcode
 import os
 from io import BytesIO
 from base64 import b64encode
 from flask_dance.contrib.google import make_google_blueprint, google
+import secrets
 
 # Configuration
 app = Flask(__name__)
@@ -57,6 +58,18 @@ class LoginAttempt(db.Model):
     success = db.Column(db.Boolean, nullable=False)
     ip_address = db.Column(db.String(45), nullable=True)  # Store the IP address of the user
 
+class PasswordResetToken(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    token = db.Column(db.String(128), unique=True, nullable=False)
+    expiration = db.Column(db.DateTime, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship("User", backref="password_reset_tokens")
+
+def generate_token():
+    return secrets.token_urlsafe(32)
+
 def generate_totp_secret():
     return pyotp.random_base32()
 
@@ -67,6 +80,10 @@ def verify_totp(secret, code):
 # Create database
 with app.app_context():
     db.create_all()
+
+def send_email(to, subject, body):
+    msg = Message(subject, recipients=[to], body=body)
+    mail.send(msg)
 
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
@@ -178,65 +195,75 @@ def activate_account(token):
 
 MAX_FAILED_ATTEMPTS = 5
 
-@app.route("/login", methods=["POST"])
+@app.route("/login", methods=['GET', 'POST'])
 def login():
-    username = request.form["username"]
-    password = request.form["password"]
-    user = User.query.filter_by(username=username).first()
+    if request.method == 'POST':
+        # Handle form submission
+        username = request.form.get('username')
+        password = request.form.get('password')
 
-    # Prepare to log the attempt
-    login_attempt = LoginAttempt(
-        username=username,
-        timestamp=datetime.utcnow(),
-        success=False,  # Default to failed attempt
-        ip_address=request.remote_addr,
-    )
+        # Find the user by username
+        user = User.query.filter_by(username=username).first()
 
-    if not user:
-        flash("User not found. Please register.", "error")
-        db.session.add(login_attempt)
-        db.session.commit()
-        return redirect(url_for("register"))
+        # Prepare to log the attempt
+        login_attempt = LoginAttempt(
+            username=username,
+            timestamp=datetime.utcnow(),
+            success=False,  # Default to failed attempt
+            ip_address=request.remote_addr,
+        )
 
-    if not user.is_active:
-        flash("Account is not activated. Check your email to activate.", "error")
-        db.session.add(login_attempt)
-        db.session.commit()
-        return redirect(url_for("index"))
-
-    if user.failed_attempts >= MAX_FAILED_ATTEMPTS:
-        flash("Account locked due to too many failed login attempts. Contact admin.", "error")
-        db.session.add(login_attempt)
-        db.session.commit()
-        return redirect(url_for("index"))
-
-    if bcrypt.check_password_hash(user.password_hash, password):
-        if user.is_2fa_enabled:
-            session["username"] = username
-            flash("Enter the 2FA code to complete login.", "info")
-            login_attempt.success = True  # Password is correct
+        if not user:
+            flash("User not found. Please register.", "error")
             db.session.add(login_attempt)
             db.session.commit()
-            return redirect(url_for("verify_2fa"))
+            return redirect(url_for("register"))
 
-        # Successful login without 2FA
-        session["username"] = username
-        user.failed_attempts = 0
-        flash("Login successful!", "success")
-        login_attempt.success = True
+        if not user.is_active:
+            flash("Account is not activated. Check your email to activate.", "error")
+            db.session.add(login_attempt)
+            db.session.commit()
+            return redirect(url_for("index"))
+
+        if user.failed_attempts >= MAX_FAILED_ATTEMPTS:
+            flash("Account locked due to too many failed login attempts. Contact admin.", "error")
+            db.session.add(login_attempt)
+            db.session.commit()
+            return redirect(url_for("index"))
+
+        if bcrypt.check_password_hash(user.password_hash, password):
+            if user.is_2fa_enabled:
+                session["username"] = username
+                flash("Enter the 2FA code to complete login.", "info")
+                login_attempt.success = True  # Password is correct
+                db.session.add(login_attempt)
+                db.session.commit()
+                return redirect(url_for("verify_2fa"))
+
+            # Successful login without 2FA
+            session["username"] = username
+            user.failed_attempts = 0
+            db.session.commit()
+            flash("Login successful!", "success")
+            login_attempt.success = True
+            db.session.add(login_attempt)
+            db.session.commit()
+            return redirect(url_for("profile"))
+
+        # Failed login: Increment failed attempts
+        user.failed_attempts += 1
+        db.session.commit()
+        if user.failed_attempts >= MAX_FAILED_ATTEMPTS:
+            flash("Account locked due to too many failed login attempts.", "error")
+        else:
+            flash("Invalid password. Please try again.", "error")
         db.session.add(login_attempt)
         db.session.commit()
-        return redirect(url_for("profile"))
+        return redirect(url_for("index"))
 
-    # Failed login: Increment failed attempts
-    user.failed_attempts += 1
-    db.session.add(login_attempt)
-    db.session.commit()
-    if user.failed_attempts >= MAX_FAILED_ATTEMPTS:
-        flash("Account locked due to too many failed login attempts.", "error")
-    else:
-        flash("Invalid password. Please try again.", "error")
-    return redirect(url_for("index"))
+    # Handle GET request (render login page)
+    return render_template("login.html")
+
 
 @app.route("/login/google/authorized")
 def google_login():
@@ -322,6 +349,74 @@ def qrcode_page():
 def view_login_attempts():
     login_attempts = LoginAttempt.query.order_by(LoginAttempt.timestamp.desc()).all()
     return render_template("admin_login_attempts.html", login_attempts=login_attempts)
+
+
+@app.route('/password-reset', methods=['GET', 'POST'])
+def request_password_reset():
+    if request.method == 'POST':
+        email = request.form['email']
+        user = User.query.filter_by(username=email).first()
+
+        if user:
+            token = generate_token()
+            expiration_time = datetime.utcnow() + timedelta(hours=1)  # Token expires in 1 hour
+            reset_token = PasswordResetToken(user_id=user.id, token=token, expiration=expiration_time)
+            db.session.add(reset_token)
+            db.session.commit()
+
+            # Send email with reset link
+            reset_link = url_for('reset_password', token=token, _external=True)
+            send_email(
+                to=email,
+                subject="Password Reset Request",
+                body=f"Click the link to reset your password: {reset_link}\nThe link expires in 1 hour."
+            )
+
+            flash("An email with password reset instructions has been sent.", "info")
+        else:
+            flash("If the email is associated with an account, a password reset email will be sent.", "info")
+        return redirect(url_for('login'))
+
+    return render_template('password_reset_request.html')
+
+@app.route('/password-reset/<token>', methods=['GET', 'POST'])
+def reset_password(token):
+    reset_token = PasswordResetToken.query.filter_by(token=token).first()
+
+    # Check if the token is valid
+    if not reset_token or reset_token.expiration < datetime.utcnow():
+        flash("The password reset token is invalid or has expired.", "error")
+        return redirect(url_for('request_password_reset'))
+
+    if request.method == 'POST':
+        new_password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+
+        if new_password != confirm_password:
+            flash("Passwords do not match.", "error")
+            return redirect(request.url)  # Stay on the same page
+
+        # Update the user's password
+        user = User.query.get(reset_token.user_id)
+        if not user:
+            flash("User not found.", "error")
+            return redirect(url_for('request_password_reset'))
+
+        # Save the hashed password to the correct field in the database
+        user.password_hash = bcrypt.generate_password_hash(new_password).decode('utf-8')
+        db.session.commit()
+
+        # Delete the used token
+        db.session.delete(reset_token)
+        db.session.commit()
+
+        flash("Your password has been reset successfully.", "success")
+        return redirect(url_for('login'))  # Redirect to login page after success
+
+    return render_template('password_reset.html')
+
+
+
 
 
 if __name__ == "__main__":

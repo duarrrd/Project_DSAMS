@@ -10,4 +10,6 @@
 <form action="/profile" method="POST">
     <button type="submit" name="enable_2fa">Enable 2FA</button>
 </form>
+    <br>
+    <a href="{{ url_for('request_password_reset') }}">Reset password</a>
 {% endif %}
