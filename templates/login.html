@@ -8,5 +8,8 @@
     <input type="password" name="password" required>
     <button type="submit">Login</button>
 </form>
+    <h3>Or Login with:</h3>
+<a href="{{ url_for('google.login') }}">Google</a>
+    <br>
 <a href="{{ url_for('register') }}">Register here</a>
 {% endblock %}

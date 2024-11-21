@@ -11,8 +11,10 @@ from itsdangerous import URLSafeTimedSerializer, SignatureExpired
 from datetime import datetime
 import pyotp
 import qrcode
+import os
 from io import BytesIO
 from base64 import b64encode
+from flask_dance.contrib.google import make_google_blueprint, google
 
 # Configuration
 app = Flask(__name__)
@@ -41,11 +43,12 @@ db = SQLAlchemy(app)
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
-    password_hash = db.Column(db.String(120), nullable=False)
+    password_hash = db.Column(db.String(120), nullable=True)  # Optional for OAuth users
     is_active = db.Column(db.Boolean, default=False)
     failed_attempts = db.Column(db.Integer, default=0)
     is_2fa_enabled = db.Column(db.Boolean, default=False)  # 2FA enabled/disabled
     totp_secret = db.Column(db.String(16), nullable=True)  # TOTP secret
+    login_method = db.Column(db.String(20), default="local")  # "local" or "oauth"
 
 class LoginAttempt(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -64,6 +67,16 @@ def verify_totp(secret, code):
 # Create database
 with app.app_context():
     db.create_all()
+
+os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+
+# Configure Google OAuth
+google_bp = make_google_blueprint(
+    client_id="681985724104-tvk755n78sajt6osqm91bi16s3ajqi4f.apps.googleusercontent.com",
+    client_secret="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",
+    redirect_to="google_login"
+)
+app.register_blueprint(google_bp, url_prefix="/login")
 
 # Password policy validation
 def validate_password(password):
@@ -224,6 +237,34 @@ def login():
     else:
         flash("Invalid password. Please try again.", "error")
     return redirect(url_for("index"))
+
+@app.route("/login/google/authorized")
+def google_login():
+    print("Step 1: Reached authorized endpoint")
+    if not google.authorized:
+        print("Step 2: Not authorized")
+        return redirect(url_for("index"))
+
+    resp = google.get("/oauth2/v1/userinfo")
+    print(f"Step 3: Google response: {resp.json()}")
+
+    user_info = resp.json()
+    email = user_info.get("email")
+
+    # Check if user exists in the database
+    user = User.query.filter_by(username=email).first()
+    if not user:
+        # If the user doesn't exist, create a new one
+        user = User(username=email, is_active=True, login_method="google")
+        db.session.add(user)
+        db.session.commit()
+
+    # Set the session
+    session["username"] = user.username  # Or any identifier
+
+    flash(f"Welcome, {user.username}! You have successfully logged in.", "success")
+    return redirect(url_for("profile"))
+
 
 @app.route("/verify-2fa", methods=["GET", "POST"])
 def verify_2fa():
