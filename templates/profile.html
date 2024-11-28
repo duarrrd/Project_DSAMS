@@ -1,15 +1,23 @@
-<h2>Profile</h2>
-{% if user.is_2fa_enabled %}
-<p>2FA is currently enabled.</p>
-<a href="/qrcode">View QR Code</a>
-<form action="/profile" method="POST">
-    <button type="submit" name="disable_2fa">Disable 2FA</button>
-</form>
-{% else %}
-<p>2FA is currently disabled.</p>
-<form action="/profile" method="POST">
-    <button type="submit" name="enable_2fa">Enable 2FA</button>
-</form>
-    <br>
-    <a href="{{ url_for('request_password_reset') }}">Reset password</a>
-{% endif %}
+{% extends "base.html" %}
+{% block content %}
+<div class="profile-section">
+    <h2>Profile</h2>
+    {% if user.is_2fa_enabled %}
+    <p>2FA is currently enabled.</p>
+    <div class="oauth-links">
+        <a href="/qrcode">View QR Code</a>
+        <form action="/profile" method="POST">
+            <button type="submit" name="disable_2fa">Disable 2FA</button>
+        </form>
+    </div>
+    {% else %}
+    <p>2FA is currently disabled.</p>
+    <div class="oauth-links">
+        <form action="/profile" method="POST">
+            <button type="submit" name="enable_2fa">Enable 2FA</button>
+        </form>
+        <a href="{{ url_for('request_password_reset') }}">Reset password</a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

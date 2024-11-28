@@ -8,8 +8,8 @@
     <input type="password" name="password" required>
     <button type="submit">Login</button>
 </form>
-    <h3>Or Login with:</h3>
-<a href="{{ url_for('google.login') }}">Google</a>
-    <br>
-<a href="{{ url_for('register') }}">Register here</a>
+<div class="oauth-links">
+    <a href="{{ url_for('google.login') }}">Login with Google</a>
+    <a href="{{ url_for('register') }}">Register here</a>
+</div>
 {% endblock %}
